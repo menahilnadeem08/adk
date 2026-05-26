@@ -1,0 +1,12 @@
+[project]
+name = "my-agent"
+version = "0.1.0"
+description = "Add your description here"
+readme = "README.md"
+requires-python = ">=3.14"
+dependencies = [
+    "ag-ui-adk>=0.6.3",
+    "fastapi>=0.136.1",
+    "google-adk>=1.33.0",
+    "uvicorn>=0.47.0",
+]
