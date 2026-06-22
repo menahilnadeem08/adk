@@ -11,6 +11,7 @@ const serviceAdapter = new ExperimentalEmptyAdapter();
 const runtime = new CopilotRuntime({
   agents: {
     my_agent: new HttpAgent({ url: "http://localhost:8000/" }),
+    SharedStateStreamingAgent: new HttpAgent({ url: "http://localhost:8000/" }),
   }
 });
 

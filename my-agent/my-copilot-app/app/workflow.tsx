@@ -10,7 +10,7 @@ type AgentState = {
 }
 
 /* Example usage in a pseudo React component */
-function YourMainContent() {
+export default function Page() {
     const [inputQuestion, setInputQuestion] = useState("What's the capital of France?");
     const [isLoading, setIsLoading] = useState(false);
 
