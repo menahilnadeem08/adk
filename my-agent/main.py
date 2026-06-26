@@ -1,3 +1,13 @@
+"""Unified agent module.
+
+Includes:
+- AgentConfigAgent: adapts tone/expertise/responseLength from frontend knobs
+  via useAgentContext / before_model_callback.
+- my_agent: unified multi-skill agent (flights, writing, delegation, canvas, etc.)
+- readonly_state_agent_context_agent: read-only context relay agent.
+- ADKAgent + FastAPI app wiring.
+"""
+
 from __future__ import annotations
 
 import json
@@ -5,14 +15,13 @@ import logging
 import uuid
 import functools
 from pathlib import Path
-from typing import Any, Optional
+from typing import Any, Optional, Union
 
 from fastapi import FastAPI
 import uvicorn
 from pydantic import BaseModel
 
 import os
-from typing import Any, Optional, Union
 from google.adk.models.google_llm import Gemini
 
 from ag_ui_adk import ADKAgent, add_adk_fastapi_endpoint, AGUIToolset
@@ -29,6 +38,10 @@ logger = logging.getLogger(__name__)
 
 DEFAULT_MODEL = "gemini-2.5-flash"
 
+
+# ===========================================================================
+# Shared Helpers
+# ===========================================================================
 
 def stop_on_terminal_text(
     callback_context: CallbackContext, llm_response: LlmResponse
@@ -80,6 +93,179 @@ def get_model(model: str = DEFAULT_MODEL) -> Union[str, Gemini]:
     return model
 
 
+# ===========================================================================
+# AgentConfigAgent — tone / expertise / responseLength knobs
+# ===========================================================================
+
+CONFIG_PREFIX_SIGNATURE = "[agent-config] config:"
+CONFIG_END_MARKER = "Honour every directive above on every turn."
+
+_TONE_OPTIONS = {"professional", "casual", "enthusiastic"}
+_EXPERTISE_OPTIONS = {"beginner", "intermediate", "expert"}
+_RESPONSE_LENGTH_OPTIONS = {"concise", "detailed"}
+
+_DEFAULT_TONE = "professional"
+_DEFAULT_EXPERTISE = "intermediate"
+_DEFAULT_RESPONSE_LENGTH = "concise"
+_CONFIG_KEYS = ("tone", "expertise", "responseLength")
+
+
+def _coerce(value: object, allowed: set[str], default: str) -> str:
+    if isinstance(value, str) and value in allowed:
+        return value
+    return default
+
+
+def _parse_context_value(value: object) -> dict | None:
+    if isinstance(value, str):
+        try:
+            parsed = json.loads(value)
+        except json.JSONDecodeError:
+            return None
+        return parsed if isinstance(parsed, dict) else None
+    return value if isinstance(value, dict) else None
+
+
+def _extract_agent_config(state: dict | None) -> dict | None:
+    """Pull the most recent {tone, expertise, responseLength} payload off
+    the agent runtime state.
+
+    useAgentContext publishes each entry as {description, value}. The
+    middleware appends these onto state["copilotkit"]["context"] as a
+    list — multiple entries may be present. We pick the latest entry whose
+    value is a dict containing at least one of our known keys.
+    """
+    if not isinstance(state, dict):
+        return None
+    copilotkit_state = state.get("copilotkit")
+    if not isinstance(copilotkit_state, dict):
+        return None
+    entries = copilotkit_state.get("context")
+    if not isinstance(entries, list):
+        return None
+    for entry in reversed(entries):
+        if not isinstance(entry, dict):
+            continue
+        value = _parse_context_value(entry.get("value"))
+        if value is None:
+            continue
+        if any(k in value for k in _CONFIG_KEYS):
+            return value
+    return None
+
+
+def _format_config(config: dict | None) -> str | None:
+    if config is None:
+        return None
+    if not isinstance(config, dict):
+        logger.warning(
+            "agent-config: agent-context entry value is %s, expected dict; "
+            "treating as empty",
+            type(config).__name__,
+        )
+        return None
+    tone = _coerce(config.get("tone"), _TONE_OPTIONS, _DEFAULT_TONE)
+    expertise = _coerce(config.get("expertise"), _EXPERTISE_OPTIONS, _DEFAULT_EXPERTISE)
+    response_length = _coerce(
+        config.get("responseLength"),
+        _RESPONSE_LENGTH_OPTIONS,
+        _DEFAULT_RESPONSE_LENGTH,
+    )
+    lines = [
+        CONFIG_PREFIX_SIGNATURE,
+        f"- Tone: {tone}",
+        f"- Expertise level: {expertise}",
+        f"- Response length: {response_length}",
+        CONFIG_END_MARKER,
+    ]
+    return "\n".join(lines)
+
+
+def _inject_config(
+    callback_context: CallbackContext, llm_request: LlmRequest
+) -> Optional[LlmResponse]:
+    config = _extract_agent_config(callback_context.state)
+    block = _format_config(config)
+
+    original = llm_request.config.system_instruction
+    if original is None:
+        original_text = ""
+    elif isinstance(original, types.Content):
+        parts = original.parts or []
+        original_text = (parts[0].text or "") if parts else ""
+    else:
+        original_text = str(original)
+
+    sig_idx = original_text.find(CONFIG_PREFIX_SIGNATURE)
+    stripped_prior_block = False
+    if sig_idx != -1:
+        end_idx = original_text.find(CONFIG_END_MARKER, sig_idx)
+        if end_idx != -1:
+            stripped_prior_block = True
+            original_text = (
+                original_text[:sig_idx]
+                + original_text[end_idx + len(CONFIG_END_MARKER):]
+            ).lstrip("\n")
+        else:
+            logger.warning(
+                "agent-config: prior config block has signature but no end "
+                "marker; leaving original_text untouched to avoid losing "
+                "user content"
+            )
+
+    if block:
+        new_text = (block + "\n\n" + original_text) if original_text else block
+    else:
+        new_text = original_text
+
+    if not new_text and not stripped_prior_block:
+        return None
+
+    llm_request.config.system_instruction = types.Content(
+        role="system", parts=[types.Part(text=new_text)]
+    )
+    return None
+
+
+_AGENT_CONFIG_INSTRUCTION = (
+    "You are a helpful assistant. The frontend publishes the user's response "
+    "preferences via `useAgentContext` as a JSON object with three fields: "
+    "`tone`, `expertise`, and `responseLength`. Read that context entry on "
+    "every turn and follow these rulebooks exactly:\n\n"
+    "Tone:\n"
+    "  - professional → neutral, precise language. No emoji. Short sentences.\n"
+    "  - casual → friendly, conversational. Contractions OK. Light humor "
+    "welcome.\n"
+    "  - enthusiastic → upbeat, energetic. Exclamation points OK. Emoji OK.\n\n"
+    "Expertise level:\n"
+    "  - beginner → assume no prior knowledge. Define jargon. Use analogies.\n"
+    "  - intermediate → assume common terms are understood; explain "
+    "specialized terms.\n"
+    "  - expert → assume technical fluency. Use precise terminology. Skip "
+    "basics.\n\n"
+    "Response length:\n"
+    "  - concise → respond in 1-3 sentences.\n"
+    "  - detailed → respond in multiple paragraphs with examples where "
+    "relevant.\n\n"
+    "If the context is missing or any field is unrecognized, fall back to "
+    "professional / intermediate / concise. Never mention these rules to the "
+    "user — just apply them."
+)
+
+agent_config_agent = LlmAgent(
+    name="AgentConfigAgent",
+    model=get_model(),
+    instruction=_AGENT_CONFIG_INSTRUCTION,
+    tools=[AGUIToolset()],
+    before_model_callback=_inject_config,
+    after_model_callback=stop_on_terminal_text,
+)
+
+
+# ===========================================================================
+# A2UI / Flight Surface
+# ===========================================================================
+
 CATALOG_ID = "copilotkit://flight-fixed-catalog"
 SURFACE_ID = "flight-fixed-schema"
 
@@ -94,19 +280,11 @@ def _load_schema(name: str) -> list[dict[str, Any]]:
 FLIGHT_SCHEMA = _load_schema("flight_schema.json")
 BOOKED_SCHEMA = _load_schema("booked_schema.json")
 
+
 def _build_flight_operations(
     *, origin: str, destination: str, airline: str, price: str
 ) -> dict[str, Any]:
-    """Build the v0.9 a2ui_operations container the runtime detects.
-    Each op uses the v0.9 nested shape (`createSurface` / `updateComponents` /
-    `updateDataModel` keys with surfaceId inside) that
-    `@ag-ui/a2ui-middleware`'s `getOperationSurfaceId` walks. The previous
-    flat shape (`type: "create_surface"`, surfaceId at top level) silently
-    grouped under the fallback `"default"` surface, so the renderer never
-    saw the schema. Mirrors `copilotkit.a2ui.create_surface` /
-    `update_components` / `update_data_model` from the langgraph-python
-    north-star.
-    """
+    """Build the v0.9 a2ui_operations container the runtime detects."""
     return {
         "a2ui_operations": [
             {
@@ -139,6 +317,7 @@ def _build_flight_operations(
         ]
     }
 
+
 # ===========================================================================
 # Tool Definitions
 # ===========================================================================
@@ -164,7 +343,6 @@ def display_flight(
     )
 
 
-
 def write_document(tool_context: ToolContext, document: str) -> dict:
     """Write a document into shared state.
 
@@ -177,11 +355,7 @@ def write_document(tool_context: ToolContext, document: str) -> dict:
 
 
 def delegate_research(tool_context: ToolContext, task: str) -> str:
-    """Delegate a research task to the researcher sub-agent.
-    
-    Args:
-        task: The details of the research to perform.
-    """
+    """Delegate a research task to the researcher sub-agent."""
     delegations = tool_context.state.setdefault("delegations", [])
     dlg_id = str(uuid.uuid4())
     dlg = {
@@ -197,11 +371,7 @@ def delegate_research(tool_context: ToolContext, task: str) -> str:
 
 
 def delegate_writing(tool_context: ToolContext, task: str) -> str:
-    """Delegate a writing/drafting task to the writer sub-agent.
-    
-    Args:
-        task: The details of the writing task.
-    """
+    """Delegate a writing/drafting task to the writer sub-agent."""
     delegations = tool_context.state.setdefault("delegations", [])
     dlg_id = str(uuid.uuid4())
     dlg = {
@@ -217,11 +387,7 @@ def delegate_writing(tool_context: ToolContext, task: str) -> str:
 
 
 def delegate_critic(tool_context: ToolContext, task: str) -> str:
-    """Delegate a critique/review task to the critique_agent sub-agent.
-    
-    Args:
-        task: The details of the critique or review task.
-    """
+    """Delegate a critique/review task to the critique_agent sub-agent."""
     delegations = tool_context.state.setdefault("delegations", [])
     dlg_id = str(uuid.uuid4())
     dlg = {
@@ -246,7 +412,9 @@ def update_canvas(
     Args:
         tool_context: Context.
         title: The title of the canvas.
-        items_json: A JSON string containing the list of items. Each item in the array should have 'id', 'label', and 'done' (boolean) keys. E.g., '[{"id": "1", "label": "Buy milk", "done": false}]'.
+        items_json: A JSON string containing the list of items. Each item in
+            the array should have 'id', 'label', and 'done' (boolean) keys.
+            E.g., '[{"id": "1", "label": "Buy milk", "done": false}]'.
     """
     state = tool_context.state
     if title:
@@ -271,29 +439,13 @@ def get_weather(tool_context: ToolContext, location: str) -> dict:
 
 
 def answer_question(tool_context: ToolContext, answer: str) -> dict[str, str]:
-    """Stores the answer to the user's question.
-
-    Args:
-        tool_context (ToolContext): The tool context for accessing state.
-        answer (str): The answer to store in state.
-
-    Returns:
-        dict[str, str]: A dictionary indicating success status.
-    """
+    """Stores the answer to the user's question."""
     tool_context.state["answer"] = answer
     return {"status": "success", "message": "Answer stored."}
 
 
 def add_resource(tool_context: ToolContext, resource: str) -> dict[str, str]:
-    """Adds a resource to the internal resources list.
-
-    Args:
-        tool_context (ToolContext): The tool context for accessing state.
-        resource (str): The resource URL or reference to add.
-
-    Returns:
-        dict[str, str]: A dictionary indicating success status.
-    """
+    """Adds a resource to the internal resources list."""
     resources = tool_context.state.get("resources", [])
     resources.append(resource)
     tool_context.state["resources"] = resources
@@ -301,29 +453,13 @@ def add_resource(tool_context: ToolContext, resource: str) -> dict[str, str]:
 
 
 def step_progress(tool_context: ToolContext, steps: list[str]) -> dict[str, str]:
-    """Reports the current progress steps.
-
-    Args:
-        tool_context (ToolContext): The tool context for accessing state.
-        steps (list[str]): The list of steps completed so far.
-
-    Returns:
-        dict[str, str]: A dictionary indicating the progress was received.
-    """
+    """Reports the current progress steps."""
     tool_context.state["observed_steps"] = steps
     return {"status": "success", "message": "Progress received."}
 
 
 def set_language(tool_context: ToolContext, new_language: str) -> dict[str, str]:
-    """Sets the language preference for the user.
-
-    Args:
-        tool_context (ToolContext): The tool context for accessing state.
-        new_language (str): The language to save in state.
-
-    Returns:
-        dict[str, str]: A dictionary indicating success status and message.
-    """
+    """Sets the language preference for the user."""
     tool_context.state["language"] = new_language
     return {"status": "success", "message": f"Language set to {new_language}"}
 
@@ -357,24 +493,11 @@ def _client() -> genai.Client:
 
 
 class _SubAgentError(Exception):
-    """Raised by `_invoke_sub_agent` when the secondary Gemini call fails.
-
-    Carries a user-facing message that's safe to surface to the supervisor
-    LLM and the frontend delegation log. The original exception is chained
-    via `__cause__` so the server-side traceback is preserved.
-    """
+    """Raised by `_invoke_sub_agent` when the secondary Gemini call fails."""
 
 
 def _invoke_sub_agent(system_prompt: str, task: str) -> str:
-    """Run a single-shot Gemini call with a sub-agent system prompt.
-
-    Catches the broad `Exception` rather than the narrow
-    `(APIError, ValueError)` set so transport-layer failures (timeouts,
-    `httpx.ConnectError`, `RuntimeError` from cancelled tasks) do not
-    crash the supervisor's tool call. Failures are re-raised as
-    `_SubAgentError` so callers can surface a useful error message in
-    the delegation log without crashing the supervisor.
-    """
+    """Run a single-shot Gemini call with a sub-agent system prompt."""
     try:
         response = _client().models.generate_content(
             model=_SUB_MODEL,
@@ -407,15 +530,7 @@ def _append_completed_delegation(
     task: str,
     result: str,
 ) -> None:
-    """Append a completed delegation entry to shared state.
-
-    LP-parity: the LP frontend renders the delegation log on `status:
-    "completed"` only. We never emit a "running" placeholder, so the log
-    grows by exactly one entry per sub-agent call when it finishes.
-    Failures still write a `"completed"` entry whose `result` is the
-    user-facing error string — the renderer keeps a single visual treatment
-    instead of needing a separate failed-state branch.
-    """
+    """Append a completed delegation entry to shared state."""
     delegations = list(tool_context.state.get("delegations") or [])
     delegations.append(
         {
@@ -435,17 +550,7 @@ _SUB_AGENT_ERROR_PREFIX = "[sub-agent error] "
 def _delegate(
     tool_context: ToolContext, *, sub_agent: str, system_prompt: str, task: str
 ) -> str:
-    """Common delegation flow: invoke sub-agent → append completed entry → return text.
-
-    The frontend's delegation log subscribes to `state["delegations"]` and
-    the supervisor LLM reads the returned string as the tool result. We
-    only append AFTER the sub-agent returns so the log mirrors LP's
-    completion-only behaviour. Sub-agent failures are surfaced as a plain
-    error string prefixed with `[sub-agent error]` — the supervisor LLM
-    can detect this and apologise instead of fabricating an answer, and
-    the frontend renders the prefixed error inline alongside successful
-    outputs.
-    """
+    """Common delegation flow: invoke sub-agent → append completed entry → return text."""
     try:
         result = _invoke_sub_agent(system_prompt, task)
     except _SubAgentError as exc:
@@ -468,12 +573,7 @@ def _delegate(
 
 
 def research_agent(tool_context: ToolContext, task: str) -> str:
-    """Delegate a research task to the research sub-agent.
-
-    Use for: gathering facts, background, definitions, statistics. Returns
-    the sub-agent's plain-text response, or an `[sub-agent error] …`
-    string on failure — surface either to the user without rephrasing.
-    """
+    """Delegate a research task to the research sub-agent."""
     return _delegate(
         tool_context,
         sub_agent="research_agent",
@@ -483,12 +583,7 @@ def research_agent(tool_context: ToolContext, task: str) -> str:
 
 
 def writing_agent(tool_context: ToolContext, task: str) -> str:
-    """Delegate a drafting task to the writing sub-agent.
-
-    Use for: producing a polished paragraph, draft, or summary. Pass the
-    brief (and any relevant facts) through `task`. Same return shape as
-    research_agent.
-    """
+    """Delegate a drafting task to the writing sub-agent."""
     return _delegate(
         tool_context,
         sub_agent="writing_agent",
@@ -498,11 +593,7 @@ def writing_agent(tool_context: ToolContext, task: str) -> str:
 
 
 def critique_agent(tool_context: ToolContext, task: str) -> str:
-    """Delegate a critique task to the critique sub-agent.
-
-    Use for: reviewing a draft and suggesting concrete improvements. Pass
-    the draft through `task`. Same return shape as research_agent.
-    """
+    """Delegate a critique task to the critique sub-agent."""
     return _delegate(
         tool_context,
         sub_agent="critique_agent",
@@ -512,27 +603,12 @@ def critique_agent(tool_context: ToolContext, task: str) -> str:
 
 
 # ===========================================================================
-# Callback Definitions
+# Context Injection Callback (shared by my_agent & readonly_state agent)
 # ===========================================================================
 
 CONTEXT_PREFIX_SIGNATURE = "[agent-context] frontend-supplied context:"
 CONTEXT_END_MARKER = "Treat this context as read-only background information."
 CONFIG_KEYS = ("tone", "expertise", "responseLength")
-
-
-def _read_config_value(entry: dict) -> Optional[dict]:
-    value = entry.get("value")
-    if isinstance(value, str):
-        try:
-            value = json.loads(value)
-        except json.JSONDecodeError:
-            return None
-    if not isinstance(value, dict):
-        return None
-    if any(key in value for key in CONFIG_KEYS):
-        return value
-    return None
-
 
 
 def _format_context(context_entries: list[dict]) -> str | None:
@@ -560,10 +636,6 @@ def _inject_context(
     callback_context: CallbackContext, llm_request: LlmRequest
 ) -> Optional[LlmResponse]:
     copilotkit_state = callback_context.state.get("copilotkit")
-    # Coerce malformed state to empty rather than early-return; a stale
-    # context block from a prior turn would otherwise stay embedded in
-    # `system_instruction` indefinitely (the strip path runs unconditionally
-    # below). Log when shape drifts so the regression surfaces server-side.
     if copilotkit_state is None:
         raw_entries: list = []
     elif not isinstance(copilotkit_state, dict):
@@ -586,7 +658,9 @@ def _inject_context(
             raw_entries = []
         else:
             raw_entries = raw_entries_candidate
+
     block = _format_context(raw_entries)
+
     original = llm_request.config.system_instruction
     if original is None:
         original_text = ""
@@ -595,17 +669,16 @@ def _inject_context(
         original_text = (parts[0].text or "") if parts else ""
     else:
         original_text = str(original)
+
     sig_idx = original_text.find(CONTEXT_PREFIX_SIGNATURE)
     stripped_prior_block = False
     if sig_idx != -1:
         end_idx = original_text.find(CONTEXT_END_MARKER, sig_idx)
         if end_idx != -1:
             stripped_prior_block = True
-            # Splice out only the prior block (preserve head + tail).
-            # See agent_config_agent.py for the full rationale.
             original_text = (
                 original_text[:sig_idx]
-                + original_text[end_idx + len(CONTEXT_END_MARKER) :]
+                + original_text[end_idx + len(CONTEXT_END_MARKER):]
             ).lstrip("\n")
         else:
             logger.warning(
@@ -613,26 +686,23 @@ def _inject_context(
                 "end marker; leaving original_text untouched to avoid "
                 "losing user content"
             )
+
     if block:
         new_text = (block + "\n\n" + original_text) if original_text else block
     else:
         new_text = original_text
+
     if not new_text and not stripped_prior_block:
-        # Nothing to inject AND we didn't strip anything. Leave
-        # system_instruction as-is — writing Content(text="") would
-        # clobber the LlmAgent's static `instruction=`. If we DID
-        # strip a prior block we must fall through and write the
-        # result so the stale block doesn't stay embedded in the
-        # existing Content. See agent_config_agent.py for full
-        # rationale.
         return None
+
     llm_request.config.system_instruction = types.Content(
         role="system", parts=[types.Part(text=new_text)]
     )
     return None
 
+
 # ===========================================================================
-# Instruction & Agent Initialization
+# my_agent — Unified Multi-Skill Agent
 # ===========================================================================
 
 _UNIFIED_INSTRUCTION = (
@@ -677,9 +747,9 @@ my_agent = LlmAgent(
         writing_agent,
         critique_agent,
         get_weather,
-        answer_question,
-        add_resource,
-        step_progress,
+        # answer_question,
+        # add_resource,
+        # step_progress,
         set_language,
         AGUIToolset(),
     ],
@@ -706,8 +776,9 @@ SHARED_STATE_STREAMING_PREDICT_STATE = [
     ),
 ]
 
+
 # ===========================================================================
-# Readonly State Agent Context Demo Implementation
+# ReadonlyStateAgentContextAgent
 # ===========================================================================
 
 _READONLY_STATE_INSTRUCTION = (
@@ -717,160 +788,19 @@ _READONLY_STATE_INSTRUCTION = (
     "turn. Use them when relevant."
 )
 
-# def _inject_readonly_context(
-#     callback_context: CallbackContext, llm_request: LlmRequest
-# ) -> Optional[LlmResponse]:
-#     print("DEBUG READONLY CALLBACK: _inject_readonly_context invoked!")
-#     raw_entries = callback_context.state.get("_ag_ui_context")
-#     if raw_entries is None:
-#         copilotkit_state = callback_context.state.get("copilotkit")
-#         if isinstance(copilotkit_state, dict):
-#             raw_entries = copilotkit_state.get("context")
-
-#     if not isinstance(raw_entries, list):
-#         raw_entries = []
-
-#     block = _format_context(raw_entries)
-
-#     original = llm_request.config.system_instruction
-#     if original is None:
-#         original_text = ""
-#     elif isinstance(original, types.Content):
-#         parts = original.parts or []
-#         original_text = (parts[0].text or "") if parts else ""
-#     else:
-#         original_text = str(original)
-
-#     sig_idx = original_text.find(CONTEXT_PREFIX_SIGNATURE)
-#     stripped_prior_block = False
-#     if sig_idx != -1:
-#         end_idx = original_text.find(CONTEXT_END_MARKER, sig_idx)
-#         if end_idx != -1:
-#             stripped_prior_block = True
-#             original_text = (
-#                 original_text[:sig_idx]
-#                 + original_text[end_idx + len(CONTEXT_END_MARKER) :]
-#             ).lstrip("\n")
-#         else:
-#             logger.warning(
-#                 "agent-context: prior context block has signature but no "
-#                 "end marker; leaving original_text untouched to avoid "
-#                 "losing user content"
-#             )
-
-#     if block:
-#         new_text = (block + "\n\n" + original_text) if original_text else block
-#     else:
-#         new_text = original_text
-
-#     if not new_text and not stripped_prior_block:
-#         return None
-
-#     llm_request.config.system_instruction = types.Content(
-#         role="system", parts=[types.Part(text=new_text)]
-#     )
-#     return None
-
-# readonly_state_agent_context_agent = LlmAgent(
-#     name="my_agent",  # Named "my_agent" to match frontend agentId
-#     model=get_model(),
-#     instruction=_READONLY_STATE_INSTRUCTION,
-#     tools=[AGUIToolset()],
-#     before_model_callback=_inject_readonly_context,
-#     after_model_callback=stop_on_terminal_text,
-# )
-
-def _inject_context(
-    callback_context: CallbackContext, llm_request: LlmRequest
-) -> Optional[LlmResponse]:
-    copilotkit_state = callback_context.state.get("copilotkit")
-    # Coerce malformed state to empty rather than early-return; a stale
-    # context block from a prior turn would otherwise stay embedded in
-    # `system_instruction` indefinitely (the strip path runs unconditionally
-    # below). Log when shape drifts so the regression surfaces server-side.
-    if copilotkit_state is None:
-        raw_entries: list = []
-    elif not isinstance(copilotkit_state, dict):
-        logger.warning(
-            "agent-context: state['copilotkit'] is %s, expected dict; "
-            "treating as empty",
-            type(copilotkit_state).__name__,
-        )
-        raw_entries = []
-    else:
-        raw_entries_candidate = copilotkit_state.get("context")
-        if raw_entries_candidate is None:
-            raw_entries = []
-        elif not isinstance(raw_entries_candidate, list):
-            logger.warning(
-                "agent-context: state['copilotkit']['context'] is %s, "
-                "expected list; treating as empty",
-                type(raw_entries_candidate).__name__,
-            )
-            raw_entries = []
-        else:
-            raw_entries = raw_entries_candidate
-    block = _format_context(raw_entries)
-    original = llm_request.config.system_instruction
-    if original is None:
-        original_text = ""
-    elif isinstance(original, types.Content):
-        parts = original.parts or []
-        original_text = (parts[0].text or "") if parts else ""
-    else:
-        original_text = str(original)
-    sig_idx = original_text.find(CONTEXT_PREFIX_SIGNATURE)
-    stripped_prior_block = False
-    if sig_idx != -1:
-        end_idx = original_text.find(CONTEXT_END_MARKER, sig_idx)
-        if end_idx != -1:
-            stripped_prior_block = True
-            # Splice out only the prior block (preserve head + tail).
-            # See agent_config_agent.py for the full rationale.
-            original_text = (
-                original_text[:sig_idx]
-                + original_text[end_idx + len(CONTEXT_END_MARKER) :]
-            ).lstrip("\n")
-        else:
-            logger.warning(
-                "agent-context: prior context block has signature but no "
-                "end marker; leaving original_text untouched to avoid "
-                "losing user content"
-            )
-    if block:
-        new_text = (block + "\n\n" + original_text) if original_text else block
-    else:
-        new_text = original_text
-    if not new_text and not stripped_prior_block:
-        # Nothing to inject AND we didn't strip anything. Leave
-        # system_instruction as-is — writing Content(text="") would
-        # clobber the LlmAgent's static `instruction=`. If we DID
-        # strip a prior block we must fall through and write the
-        # result so the stale block doesn't stay embedded in the
-        # existing Content. See agent_config_agent.py for full
-        # rationale.
-        return None
-    llm_request.config.system_instruction = types.Content(
-        role="system", parts=[types.Part(text=new_text)]
-    )
-    return None
-_INSTRUCTION = (
-    "You are an assistant that uses frontend-supplied context to give "
-    "more relevant answers. The frontend passes read-only context entries "
-    "via useAgentContext; they are added to your system prompt every "
-    "turn. Use them when relevant."
-)
 readonly_state_agent_context_agent = LlmAgent(
     name="ReadonlyStateAgentContextAgent",
     model=get_model(),
-    instruction=_INSTRUCTION,
+    instruction=_READONLY_STATE_INSTRUCTION,
     tools=[AGUIToolset()],
     before_model_callback=_inject_context,
     after_model_callback=stop_on_terminal_text,
 )
 
-# Re-assign my_agent to this context agent so it gets picked up by ADKAgent
-# my_agent = readonly_state_agent_context_agent
+
+# ===========================================================================
+# ADKAgent + FastAPI App
+# ===========================================================================
 
 adk_agent = ADKAgent(
     adk_agent=my_agent,
