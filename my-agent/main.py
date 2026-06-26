@@ -555,35 +555,38 @@ def _format_context(context_entries: list[dict]) -> str | None:
     lines.append(CONTEXT_END_MARKER)
     return "\n".join(lines)
 
+
 def _inject_context(
     callback_context: CallbackContext, llm_request: LlmRequest
 ) -> Optional[LlmResponse]:
-    print("DEBUG: _inject_context callback invoked!")
-    raw_entries = callback_context.state.get("_ag_ui_context")
-    if raw_entries is None:
-        copilotkit_state = callback_context.state.get("copilotkit")
-        if isinstance(copilotkit_state, dict):
-            raw_entries = copilotkit_state.get("context")
-
-    if not isinstance(raw_entries, list):
+    copilotkit_state = callback_context.state.get("copilotkit")
+    # Coerce malformed state to empty rather than early-return; a stale
+    # context block from a prior turn would otherwise stay embedded in
+    # `system_instruction` indefinitely (the strip path runs unconditionally
+    # below). Log when shape drifts so the regression surfaces server-side.
+    if copilotkit_state is None:
+        raw_entries: list = []
+    elif not isinstance(copilotkit_state, dict):
+        logger.warning(
+            "agent-context: state['copilotkit'] is %s, expected dict; "
+            "treating as empty",
+            type(copilotkit_state).__name__,
+        )
         raw_entries = []
-
-    # format read-only context items
+    else:
+        raw_entries_candidate = copilotkit_state.get("context")
+        if raw_entries_candidate is None:
+            raw_entries = []
+        elif not isinstance(raw_entries_candidate, list):
+            logger.warning(
+                "agent-context: state['copilotkit']['context'] is %s, "
+                "expected list; treating as empty",
+                type(raw_entries_candidate).__name__,
+            )
+            raw_entries = []
+        else:
+            raw_entries = raw_entries_candidate
     block = _format_context(raw_entries)
-
-    # also extract any config entries
-    cfg = next(
-        (
-            value
-            for entry in reversed(raw_entries)
-            if (value := _read_config_value(entry)) is not None
-        ),
-        {},
-    )
-    tone = cfg.get("tone", "professional")
-    expertise = cfg.get("expertise", "intermediate")
-    response_length = cfg.get("responseLength", "concise")
-
     original = llm_request.config.system_instruction
     if original is None:
         original_text = ""
@@ -592,44 +595,41 @@ def _inject_context(
         original_text = (parts[0].text or "") if parts else ""
     else:
         original_text = str(original)
-
-    # Strip previous injected block if present
     sig_idx = original_text.find(CONTEXT_PREFIX_SIGNATURE)
     stripped_prior_block = False
     if sig_idx != -1:
         end_idx = original_text.find(CONTEXT_END_MARKER, sig_idx)
         if end_idx != -1:
             stripped_prior_block = True
+            # Splice out only the prior block (preserve head + tail).
+            # See agent_config_agent.py for the full rationale.
             original_text = (
                 original_text[:sig_idx]
                 + original_text[end_idx + len(CONTEXT_END_MARKER) :]
             ).lstrip("\n")
         else:
             logger.warning(
-                "agent-context: prior context block has signature but no end marker; leaving original_text untouched"
+                "agent-context: prior context block has signature but no "
+                "end marker; leaving original_text untouched to avoid "
+                "losing user content"
             )
-
-    # Append tone/expertise/responseLength instructions
-    config_prompt = (
-        f"\nPlease respond with the following preferences:\n"
-        f"- Tone: {tone}\n"
-        f"- Expertise: {expertise}\n"
-        f"- Response Length: {response_length}\n"
-    )
-
     if block:
-        new_text = block + "\n\n" + original_text + config_prompt
+        new_text = (block + "\n\n" + original_text) if original_text else block
     else:
-        new_text = original_text + config_prompt
-
+        new_text = original_text
     if not new_text and not stripped_prior_block:
+        # Nothing to inject AND we didn't strip anything. Leave
+        # system_instruction as-is — writing Content(text="") would
+        # clobber the LlmAgent's static `instruction=`. If we DID
+        # strip a prior block we must fall through and write the
+        # result so the stale block doesn't stay embedded in the
+        # existing Content. See agent_config_agent.py for full
+        # rationale.
         return None
-
     llm_request.config.system_instruction = types.Content(
         role="system", parts=[types.Part(text=new_text)]
     )
     return None
-
 
 # ===========================================================================
 # Instruction & Agent Initialization
