@@ -8,12 +8,17 @@ import { NextRequest } from "next/server";
 
 const serviceAdapter = new ExperimentalEmptyAdapter();
 
+const agent = new HttpAgent({ url: "http://localhost:8000/" });
+
 const runtime = new CopilotRuntime({
   agents: {
-    my_agent: new HttpAgent({ url: "http://localhost:8000/" }),
-    SharedStateStreamingAgent: new HttpAgent({ url: "http://localhost:8000/" }),
-  }
+    my_agent: agent,
+    SharedStateStreamingAgent: agent,
+    "a2ui-fixed-schema": agent,
+  },
+  a2ui: { injectA2UITool: true, agents: ["a2ui-fixed-schema", "SharedStateStreamingAgent", "my_agent"] },
 });
+
 
 export const POST = async (req: NextRequest) => {
   const { handleRequest } = copilotRuntimeNextJSAppRouterEndpoint({
