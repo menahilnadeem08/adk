@@ -1,3 +1,42 @@
+"use client";
+
+/**
+ * Agent Config Object — typed config knobs (tone / expertise / responseLength)
+ * forwarded from the provider into the agent so its behavior changes per turn.
+ *
+ * Wiring: the toggles live in `useAgentConfig`. Each render the resolved
+ * config is published to the agent via `useAgentContext` — the v2 idiom
+ * for "frontend → agent runtime context". The Python agent picks it up
+ * through a before-model callback that reads
+ * `state["copilotkit"]["context"]` and injects a derived directive block
+ * into the model's system instruction before each call.
+ */
+
+import { CopilotKit } from "@copilotkit/react-core/v2";
+
+import { DemoLayout } from "./demo-layout";
+import { ConfigContextRelay } from "./config-context-relay";
+import { useAgentConfig } from "./use-agent-config";
+
+export default function AgentConfigDemoPage() {
+  const { config, setTone, setExpertise, setResponseLength } = useAgentConfig();
+
+  return (
+    <CopilotKit
+      runtimeUrl="/api/copilotkit-agent-config"
+      agent="agent-config-demo"
+    >
+      <ConfigContextRelay config={config} />
+      <DemoLayout
+        config={config}
+        onToneChange={setTone}
+        onExpertiseChange={setExpertise}
+        onResponseLengthChange={setResponseLength}
+      />
+    </CopilotKit>
+  );
+}
+//==========SUBAGENT CONFIG=========
 // "use client";
 
 // import React from "react";
@@ -156,60 +195,61 @@
 //     />
 //   );
 // }
-"use client"
-import { CopilotSidebar, useAgent, UseAgentUpdate } from "@copilotkit/react-core/v2"; 
-import { NotesCard } from "./Notes.tsx"
+//============Shared State
+// "use client"
+// import { CopilotSidebar, useAgent, UseAgentUpdate } from "@copilotkit/react-core/v2"; 
+// import { NotesCard } from "./Notes.tsx"
 
-interface NotesAgentState {
-  notes?: string[];
-}
+// interface NotesAgentState {
+//   notes?: string[];
+// }
 
-export default function Page() {
-  const { agent } = useAgent({
-    agentId: "my_agent",
-    updates: [UseAgentUpdate.OnStateChanged],
-  });
+// export default function Page() {
+//   const { agent } = useAgent({
+//     agentId: "my_agent",
+//     updates: [UseAgentUpdate.OnStateChanged],
+//   });
 
-  const agentState = agent.state as NotesAgentState | undefined;
-  const notes = agentState?.notes ?? [];
+//   const agentState = agent.state as NotesAgentState | undefined;
+//   const notes = agentState?.notes ?? [];
 
-  const handleClear = () => {
-    agent.setState({
-      ...agentState,
-      notes: [],
-    });
-  };
+//   const handleClear = () => {
+//     agent.setState({
+//       ...agentState,
+//       notes: [],
+//     });
+//   };
 
-  return (
-    <main className="min-h-screen bg-radial from-[#F5F7FA] to-[#E4E8F0] dark:from-[#0F1115] dark:to-[#171921] flex flex-col items-center justify-center p-6 transition-colors duration-300">
-      <div className="w-full max-w-xl space-y-8 animate-fade-in">
-        {/* Premium Header */}
-        <div className="text-center space-y-2">
-          <div className="inline-flex items-center gap-2 px-3 py-1 rounded-full bg-blue-500/10 text-blue-600 dark:text-blue-400 text-xs font-semibold tracking-wide uppercase">
-            <span className="w-2 h-2 rounded-full bg-blue-500 animate-pulse" />
-            Agent Connected
-          </div>
-          <h1 className="text-4xl font-extrabold text-transparent bg-clip-text bg-gradient-to-r from-neutral-900 to-neutral-600 dark:from-white dark:to-neutral-400 tracking-tight">
-            Co-Pilot Workspace
-          </h1>
-          <p className="text-sm text-neutral-500 dark:text-neutral-400 max-w-sm mx-auto">
-            Interact with the agent in the sidebar. Its thoughts and observations will stream live on the scratchpad below.
-          </p>
-        </div>
+//   return (
+//     <main className="min-h-screen bg-radial from-[#F5F7FA] to-[#E4E8F0] dark:from-[#0F1115] dark:to-[#171921] flex flex-col items-center justify-center p-6 transition-colors duration-300">
+//       <div className="w-full max-w-xl space-y-8 animate-fade-in">
+//         {/* Premium Header */}
+//         <div className="text-center space-y-2">
+//           <div className="inline-flex items-center gap-2 px-3 py-1 rounded-full bg-blue-500/10 text-blue-600 dark:text-blue-400 text-xs font-semibold tracking-wide uppercase">
+//             <span className="w-2 h-2 rounded-full bg-blue-500 animate-pulse" />
+//             Agent Connected
+//           </div>
+//           <h1 className="text-4xl font-extrabold text-transparent bg-clip-text bg-gradient-to-r from-neutral-900 to-neutral-600 dark:from-white dark:to-neutral-400 tracking-tight">
+//             Co-Pilot Workspace
+//           </h1>
+//           <p className="text-sm text-neutral-500 dark:text-neutral-400 max-w-sm mx-auto">
+//             Interact with the agent in the sidebar. Its thoughts and observations will stream live on the scratchpad below.
+//           </p>
+//         </div>
 
-        {/* Card Wrapper with premium shadow and border */}
-        <div className="relative group transition-all duration-300">
-          <div className="absolute -inset-0.5 bg-gradient-to-r from-blue-500 to-indigo-500 rounded-2xl opacity-10 blur group-hover:opacity-15 transition-opacity duration-300" />
-          <div className="relative bg-white dark:bg-[#1E222B] rounded-2xl border border-neutral-200/80 dark:border-neutral-800 shadow-xl overflow-hidden p-1">
-            <NotesCard notes={notes} onClear={handleClear} />
-          </div>
-        </div>
-      </div>
+//         {/* Card Wrapper with premium shadow and border */}
+//         <div className="relative group transition-all duration-300">
+//           <div className="absolute -inset-0.5 bg-gradient-to-r from-blue-500 to-indigo-500 rounded-2xl opacity-10 blur group-hover:opacity-15 transition-opacity duration-300" />
+//           <div className="relative bg-white dark:bg-[#1E222B] rounded-2xl border border-neutral-200/80 dark:border-neutral-800 shadow-xl overflow-hidden p-1">
+//             <NotesCard notes={notes} onClear={handleClear} />
+//           </div>
+//         </div>
+//       </div>
 
-      <CopilotSidebar />
-    </main>
-  );
-}
+//       <CopilotSidebar />
+//     </main>
+//   );
+// }
 
 
 
