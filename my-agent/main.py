@@ -354,6 +354,15 @@ def write_document(tool_context: ToolContext, document: str) -> dict:
     return {"status": "ok", "length": len(document)}
 
 
+def set_notes(tool_context: ToolContext, notes: list[str]) -> dict:
+    """Update the list of observations or notes about the user in the shared state scratchpad.
+
+    Call this whenever you make new observations about the user or need to update the scratchpad.
+    """
+    tool_context.state["notes"] = notes
+    return {"status": "ok", "count": len(notes)}
+
+
 def delegate_research(tool_context: ToolContext, task: str) -> str:
     """Delegate a research task to the researcher sub-agent."""
     delegations = tool_context.state.setdefault("delegations", [])
@@ -728,7 +737,8 @@ _UNIFIED_INSTRUCTION = (
     "7. Task Progress tracking: When performing a multi-step task, break it down into steps and report your progress using "
     "the `step_progress` tool after completing each step.\n"
     "8. Language Preference: Help users by answering their questions. Please use the language specified in state (key: 'language') "
-    "when responding to the user. You can set/change the language preference in state by using the `set_language` tool.\n\n"
+    "when responding to the user. You can set/change the language preference in state by using the `set_language` tool.\n"
+    "9. Observations / Scratchpad: Save observations, facts, or notes about the user into the shared state scratchpad by calling the `set_notes` tool with the updated list of strings. Do this whenever the user shares important details you want to remember.\n\n"
     "Adopt the user preferences (tone, expertise, response length) specified in your context when answering."
 )
 
@@ -737,20 +747,21 @@ my_agent = LlmAgent(
     model=get_model(_SUB_MODEL),
     instruction=_UNIFIED_INSTRUCTION,
     tools=[
-        display_flight,
+        # display_flight,
         write_document,
-        delegate_research,
-        delegate_writing,
-        delegate_critic,
-        update_canvas,
-        research_agent,
-        writing_agent,
-        critique_agent,
-        get_weather,
+        set_notes,
+        # delegate_research,
+        # delegate_writing,
+        # delegate_critic,
+        # update_canvas,
+        # research_agent,
+        # writing_agent,
+        # critique_agent,
+        # get_weather,
         # answer_question,
         # add_resource,
         # step_progress,
-        set_language,
+        # set_language,
         AGUIToolset(),
     ],
     generate_content_config=types.GenerateContentConfig(
