@@ -12,17 +12,19 @@ const agent = new HttpAgent({ url: "http://localhost:8000/" });
 
 const runtime = new CopilotRuntime({
   agents: {
-    my_agent: agent,
+    "declarative-gen-ui": agent,
   },
-  a2ui: { injectA2UITool: true, agents: ["my_agent"] },
-});
+  a2ui: {
+    injectA2UITool: true,
 
+  },
+});
 
 export const POST = async (req: NextRequest) => {
   const { handleRequest } = copilotRuntimeNextJSAppRouterEndpoint({
     runtime,
     serviceAdapter,
-    endpoint: "/api/copilotkit",
+    endpoint: "/api/copilotkit-declarative-gen-ui",
   });
 
   return handleRequest(req);
