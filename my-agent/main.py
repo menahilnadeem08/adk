@@ -740,8 +740,8 @@ my_agent = LlmAgent(
     instruction=_UNIFIED_INSTRUCTION,
     tools=[
         # display_flight,
-        write_document,
-        set_notes,
+        # write_document,
+        # set_notes,
         # delegate_research,
         # delegate_writing,
         # delegate_critic,
@@ -771,11 +771,15 @@ SHARED_STATE_STREAMING_PREDICT_STATE = [
         state_key="document",
         tool="write_document",
         tool_argument="document",
+        emit_confirm_tool=False,
+        stream_tool_call=True,
     ),
     PredictStateMapping(
         state_key="observed_steps",
         tool="step_progress",
         tool_argument="steps",
+        emit_confirm_tool=False,
+        stream_tool_call=True,
     ),
 ]
 

@@ -100,7 +100,7 @@
 //   CopilotSidebar,
 // } from "@copilotkit/react-core/v2";
 
-// import { DocumentView } from "./demo-layout.tsx";
+// import { DocumentView } from "./document-view.tsx";
 
 // interface StreamingAgentState {
 //   document?: string;
@@ -291,7 +291,6 @@ import { CustomCatchallRenderer, type CatchallToolStatus } from "./custom-catcha
 import { z } from "zod";
 import { TimePickerCard } from "./time-picker-card";
 import { myCatalog } from "./catalog";
-import dashboardData from "./dashboard-data.json";
 //import { catalog } from "./catalog";
 const AGENT_ID = "my_agent";
 //import AgentDashboard from "./AgentDashboard";    
@@ -397,11 +396,11 @@ export default function Page() {
   //   [],
   // );
 
-//  useComponent({
-//     name: "render_bar_chart",
-//     description: "Display a bar chart with labeled numeric values.",
-//     render: IndexLineChart,
-//   });
+ useComponent({
+    name: "render_bar_chart",
+    description: "Display a bar chart with labeled numeric values.",
+    render: IndexLineChart,
+  });
  
   // const visible = (agent.messages ?? []).filter(
   //   (m) => m.role === "user" || m.role === "assistant"
@@ -514,7 +513,7 @@ console.log("feedback", {
         </button>
       )} */}
       
-          <CopilotKit
+          {/* <CopilotKit
       runtimeUrl="/api/copilotkit-declarative-gen-ui"
       agent="declarative-gen-ui"
       a2ui={{ catalog: myCatalog }}>
@@ -523,8 +522,9 @@ console.log("feedback", {
           <CopilotSidebar />
         </div>
       </div>
-    </CopilotKit>
-      {/* <CopilotSidebar /> */}
+    </CopilotKit> */}
+
+      <CopilotSidebar />
 
 {/* Customization */}
 {/* <div
@@ -574,19 +574,19 @@ console.log("feedback", {
 
 
 //===================Slots==============================
-// const CustomMessageView = ({ messages, isRunning }) => (
-//   <div className="space-y-4 p-6">
-//     {messages?.map((msg) => (
-//       <div key={msg.id} className={msg.role === "user" ? "text-right" : "text-left"}>
-//         {msg.content}
-//       </div>
-//     ))}
-//     {isRunning && <div className="animate-pulse">Thinking...</div>}
-//   </div>
-// );
-// export function Chat() {
-//   return <CopilotChat messageView={CustomMessageView} />;
-// }
+const CustomMessageView = ({ messages, isRunning }) => (
+  <div className="space-y-4 p-6">
+    {messages?.map((msg) => (
+      <div key={msg.id} className={msg.role === "user" ? "text-right" : "text-left"}>
+        {msg.content}
+      </div>
+    ))}
+    {isRunning && <div className="animate-pulse">Thinking...</div>}
+  </div>
+);
+export function Chat() {
+  return <CopilotChat messageView={CustomMessageView} />;
+}
 
 //=================PAUSING AGENTS================
 // function Chat() {
@@ -686,14 +686,6 @@ function AssistantBubble({
 }
 
 
-function DashboardDataRelay() {
-  useAgentContext({
-    description:
-      "Vantage Threads FY 2024 sales dataset. Use these exact figures when the user asks about revenue, sales, team performance, products, or regions.",
-    value: dashboardData,
-  });
-  return null;
-}
 
 function ActivityWrapper({ children }: { children: React.ReactNode }) {
   return (
